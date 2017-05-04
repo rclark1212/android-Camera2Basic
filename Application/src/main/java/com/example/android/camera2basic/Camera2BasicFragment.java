@@ -128,6 +128,10 @@ public class Camera2BasicFragment extends Fragment
      */
     private static final int MAX_PREVIEW_HEIGHT = 1080;
 
+    //Save a copy of the last buffer
+    private byte[] mLastBuffer = null;
+    private View mControlView;
+
     /**
      * {@link TextureView.SurfaceTextureListener} handles several lifecycle events on a
      * {@link TextureView}.
@@ -243,7 +247,57 @@ public class Camera2BasicFragment extends Fragment
 
         @Override
         public void onImageAvailable(ImageReader reader) {
-            mBackgroundHandler.post(new ImageSaver(reader.acquireNextImage(), mFile));
+            //okay - don't save below...
+            //mBackgroundHandler.post(new ImageSaver(reader.acquireNextImage(), mFile));
+            Image image =  reader.acquireNextImage();
+            if (image != null) {
+                //This gets Y for YUV_420_888 (format is Y = plane[0], U = plane[1], V = plane[2]
+                //https://developer.android.com/reference/android/graphics/ImageFormat.html#YUV_422_888
+                ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                byte[] bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
+                Log.d(TAG, "Got an image!");
+                //now do something here with the bytes...
+                //compare to lastbuffer - put into routine eventually...
+                //super-simple compare - look for number of pixels with > threshold difference
+                final int value_threshold = 32;
+                final int pixel_threshold = 30000;
+                int delta_pixels = 0;
+                if (mLastBuffer != null) {
+                    for (int i = 0; i < bytes.length; i++) {
+                        int delta;
+                        if (bytes[i] >= mLastBuffer[i]) {
+                            delta = bytes[i] - mLastBuffer[i];
+                        } else {
+                            delta = mLastBuffer[i] - bytes[i];
+                        }
+                        if (delta > value_threshold) {
+                            delta_pixels++;
+                        }
+                    }
+                }
+                Log.d(TAG, "Pixel delta of " + delta_pixels);
+                final int color;
+                if (delta_pixels > pixel_threshold) {
+                    color = getResources().getColor(R.color.control_motion,null);
+                } else {
+                    color = getResources().getColor(R.color.control_background,null);
+                }
+
+                image.close();
+                mLastBuffer = bytes;
+
+                //and set color...
+                Handler mainHandler = new Handler(getActivity().getMainLooper());
+
+                Runnable myRunnable = new Runnable() {
+                    @Override
+                    public void run() {
+                        mControlView.setBackgroundColor(color);
+                    } // This is your code
+                };
+                mainHandler.post(myRunnable);
+            }
         }
 
     };
@@ -421,7 +475,9 @@ public class Camera2BasicFragment extends Fragment
     @Override
     public View onCreateView(LayoutInflater inflater, ViewGroup container,
                              Bundle savedInstanceState) {
-        return inflater.inflate(R.layout.fragment_camera2_basic, container, false);
+        View view = inflater.inflate(R.layout.fragment_camera2_basic, container, false);
+        mControlView = view.findViewById(R.id.control);
+        return view;
     }
 
     @Override
@@ -512,8 +568,8 @@ public class Camera2BasicFragment extends Fragment
                 Size largest = Collections.max(
                         Arrays.asList(map.getOutputSizes(ImageFormat.JPEG)),
                         new CompareSizesByArea());
-                mImageReader = ImageReader.newInstance(largest.getWidth(), largest.getHeight(),
-                        ImageFormat.JPEG, /*maxImages*/2);
+                //hardcode to 640x480 for now (and YUV420)
+                mImageReader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, /*maxImages*/2);
                 mImageReader.setOnImageAvailableListener(
                         mOnImageAvailableListener, mBackgroundHandler);
 
@@ -626,6 +682,12 @@ public class Camera2BasicFragment extends Fragment
      */
     private void closeCamera() {
         try {
+            mCaptureSession.abortCaptures();
+        } catch (Exception e) {
+            //blah...Still having a problem on onPause. Fix it in the real app. (note - while paused, app keeps capturing per logs).
+        }
+
+        try {
             mCameraOpenCloseLock.acquire();
             if (null != mCaptureSession) {
                 mCaptureSession.close();
@@ -683,9 +745,15 @@ public class Camera2BasicFragment extends Fragment
             // This is the output Surface we need to start preview.
             Surface surface = new Surface(texture);
 
+            //Add a surface to consume data (we want the RGB for further processing)...
+            Surface mImageSurface = mImageReader.getSurface();
+
             // We set up a CaptureRequest.Builder with the output Surface.
             mPreviewRequestBuilder
                     = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            //Add our new surface we are consuming...
+            mPreviewRequestBuilder.addTarget(mImageSurface);
+            //And preview surface
             mPreviewRequestBuilder.addTarget(surface);
 
             // Here, we create a CameraCaptureSession for camera preview.
